@@ -1,7 +1,7 @@
 // Runs the registry (worker.js) on this computer, for tests and local work:
 // D1 becomes a SQLite file and KV a folder, both under `--data`.
 //
-//   node registry/local.mjs [--port 0] [--data <folder>] [--account <name>]...
+//   node local.mjs [--port 0] [--data <folder>] [--account <name>]...
 //
 // It listens on 127.0.0.1 and prints one line of JSON once it does: the
 // registry's address, and a token for each `--account` it made. The admin

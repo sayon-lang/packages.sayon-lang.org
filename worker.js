@@ -1,5 +1,5 @@
 // Sayon's package registry, as a Cloudflare Worker. It speaks the registry
-// protocol (docs/registry.md) over HTTPS: package information and search,
+// protocol (PROTOCOL.md) over HTTPS: package information and search,
 // archives by name and version, and publication by account tokens. D1 (the
 // binding `DB`, schema.sql) holds accounts, packages, and versions; KV (the
 // binding `ARCHIVES`) holds each version's archive, which never changes once
@@ -50,7 +50,7 @@ async function route(request, env) {
     return new Response(
       "Sayon's package registry, protocol 1.\n" +
         "Sayon finds packages here with `sayon search`, `sayon info`, and `sayon install`.\n" +
-        "The protocol: https://github.com/Omnifex-Studio/sayon/blob/main/docs/registry.md\n",
+        "The protocol: https://github.com/sayon-lang/packages.sayon-lang.org/blob/main/PROTOCOL.md\n",
       { headers: { "content-type": "text/plain; charset=utf-8" } },
     );
   }

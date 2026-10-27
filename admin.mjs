@@ -2,12 +2,12 @@
 // account's token, which `sayon login` then takes. The registry's admin
 // token comes from the environment's SAYON_REGISTRY_ADMIN_TOKEN.
 //
-//   node registry/admin.mjs <registry address> <account> [--replace]
+//   node admin.mjs <registry address> <account> [--replace]
 
 const [registry, name, flag] = process.argv.slice(2);
 const admin = process.env.SAYON_REGISTRY_ADMIN_TOKEN;
 if (!registry || !name || (flag && flag !== "--replace")) {
-  console.error("usage: node registry/admin.mjs <registry address> <account> [--replace]");
+  console.error("usage: node admin.mjs <registry address> <account> [--replace]");
   process.exit(2);
 }
 if (!admin) {

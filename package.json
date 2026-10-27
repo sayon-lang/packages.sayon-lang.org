@@ -1,4 +1,11 @@
 {
+  "name": "sayon-registry",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "description": "Sayon's package registry: a Cloudflare Worker, run in Node for tests and local work",
+  "license": "Apache-2.0 WITH LLVM-exception",
+  "scripts": {
+    "start": "node local.mjs --port 4100 --data data",
+    "test": "node --test"
+  }
 }
