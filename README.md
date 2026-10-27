@@ -1,63 +1,51 @@
 <p align="center">
-  <img src="logo.svg" alt="Sayon logo" width="120">
+  <img src="static/images/logo.svg" alt="Sayon logo" width="120">
 </p>
 
 <h1 align="center">Sayon's package registry</h1>
 
-The service behind `sayon install`, `search`, `info`, `publish`, `login`, and `logout`: published [Sayon](https://github.com/sayon-lang/sayon) packages, each version's archive, and the accounts that publish them. [PROTOCOL.md](PROTOCOL.md) is how `sayon` talks to it.
+The registry of [Sayon](https://github.com/sayon-lang/sayon) packages, like crates.io for Rust: a website to find packages, the API that `sayon publish`, `login`, and `search` use, and the index that `sayon install` reads, served by one Sayon program. [PROTOCOL.md](PROTOCOL.md) is how `sayon` talks to it, and Sayon's index is [packages.sayon-lang.org-index](https://github.com/sayon-lang/packages.sayon-lang.org-index).
 
-Sayon's registry is not operated yet; it will be at `packages.sayon-lang.org`. Until then `sayon` uses the registry on your own computer, at `http://127.0.0.1:4100`, which this repository runs.
+Sayon's registry is not operated yet; it will be at `packages.sayon-lang.org`. Until then `sayon` uses the registry on your own computer, whose index is at `http://127.0.0.1:4100/index`, which this repository runs.
 
 ## On this computer
 
-With [Node](https://nodejs.org) 22.5 or later, and nothing to install:
+With Sayon, and nothing else:
 
 ```bash
-node local.mjs --port 4100 --data data --account ada
+sayon run -- --port 4100 --account ada
 ```
 
-It serves the registry at `http://127.0.0.1:4100`, keeps its data in the folder `data`, and prints one line of JSON with the address and a token for each `--account`. `sayon` finds it there by default:
+It serves the registry at `http://127.0.0.1:4100`: its pages, its API, and its index at `/index`. It keeps accounts, owners, and archives in the folder `data`, and the index in `data/index`, and prints one line of JSON with its addresses and a token for each `--account`. `sayon` finds it there by default:
 
 ```bash
 sayon login
 sayon publish
 ```
 
-`sayon login` asks for the token. Set `SAYON_REGISTRY_ADMIN_TOKEN` before starting it to make accounts later, with `node admin.mjs http://127.0.0.1:4100 <name>`. `--port 0` takes a free port, as the tests of `sayon` do; `SAYON_REGISTRY` then tells `sayon` where it is.
+`sayon login` asks for the token. Other options:
+
+- `--data <folder>` keeps the registry's data elsewhere, and `--index <folder>` its index. Given a clone of packages.sayon-lang.org-index, each publication becomes a commit there, with the operator's own Git identity.
+- `--port 0` takes a free port, as the tests of `sayon` do; `SAYON_REGISTRY` then tells `sayon` where the index is.
+- `SAYON_REGISTRY_ADMIN_TOKEN` is the operator's token, for making accounts later with `POST /api/v1/users`.
 
 ## How it is made
 
-`worker.js` is the whole service, a [Cloudflare Worker](https://developers.cloudflare.com/workers/): accounts, packages, and versions in a D1 database (`schema.sql`), and archives in KV, written before their rows so that no listed version lacks one. The two rows of a publication go in one batch whose inserts check the owner, so two publications at once cannot take a name or a version from each other. It checks an archive as `sayon` does and reads its `sayon.toml`.
+`src/main.sayon` reads the options and starts `src/server.sayon`, which answers one request at a time, so that publications never interleave:
 
-`local.mjs` runs the same module in Node, with `node:sqlite` in place of D1 and a folder in place of KV. `admin.mjs` makes accounts on any registry that has the admin token.
+- `src/api.sayon`: the API and the index, checking archives (`src/archive.sayon`) and manifests (`src/manifest.sayon`) as `sayon` does;
+- `src/index.sayon`: the index's files, a line of JSON for each version, added to and committed;
+- `src/accounts.sayon`: accounts, with tokens from `standard/crypto` and only their SHA-256 kept, and who owns each package;
+- `src/site.sayon`: the pages, a list of every package, a search, and a page for each package with its versions and the line that adds it to `sayon.toml`;
+- `src/http.sayon`: requests and responses, over `standard/network`.
 
 ## Tests
 
 ```bash
-node --test
+sayon test
 ```
 
-`test/registry.test.mjs` starts the registry and goes through what the protocol promises: accounts and tokens, publishing and its refusals, information, search, and archives with their digests. The tests of [sayon-lang/sayon](https://github.com/sayon-lang/sayon) also run `sayon` itself against this registry, when this repository is checked out beside it, as `../packages.sayon-lang.org`.
-
-## On Cloudflare
-
-The service is built for Cloudflare's free plan, which runs it at `https://<name>.<subdomain>.workers.dev` with no domain of your own. With an account at Cloudflare:
-
-```bash
-npx wrangler@4 login
-npx wrangler@4 d1 create sayon-registry
-npx wrangler@4 kv namespace create ARCHIVES
-```
-
-Put the two ids they print in `wrangler.toml`, then create the tables, deploy, and give the registry its admin token, a long random one that you keep:
-
-```bash
-npx wrangler@4 d1 execute sayon-registry --remote --file schema.sql
-npx wrangler@4 deploy
-npx wrangler@4 secret put ADMIN_TOKEN
-```
-
-`deploy` prints the registry's address. `npx wrangler@4 dev --local` runs it in Cloudflare's own runtime on this computer, with D1's own engine.
+The tests check versions, archives, manifests, the index, and accounts, and run the server and ask it to publish, refuse, serve the index and archives, and show its pages. The tests of [sayon-lang/sayon](https://github.com/sayon-lang/sayon) also run `sayon` itself against this registry, when this repository is checked out beside it, as `../packages.sayon-lang.org`.
 
 ## License
 

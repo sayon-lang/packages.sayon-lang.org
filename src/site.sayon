@@ -1,0 +1,126 @@
+# The registry's pages: the packages, a search, and a page for each package
+# with its versions, its dependencies, and the line that adds it to a
+# project.
+
+collections = import("standard/collections.sayon")
+strings = import("standard/strings.sayon")
+accounts = import("src/accounts.sayon")
+html = import("src/html.sayon")
+http = import("src/http.sayon")
+index = import("src/index.sayon")
+registry = import("src/registry.sayon")
+semver = import("src/semver.sayon")
+
+constant GITHUB = "https://github.com/sayon-lang"
+
+private function page(title: string, query: string, body: Array<string>) -> string
+    out: Array<string> = []
+    push(out, "<!doctype html>")
+    push(out, "<html lang=\"en\">")
+    push(out, "<head>")
+    push(out, "  <meta charset=\"utf-8\">")
+    push(out, "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
+    push(out, "  <title>{html.text(title)}</title>")
+    push(out, "  <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"any\">")
+    push(out, "  <link rel=\"icon\" href=\"/images/logo.svg\" type=\"image/svg+xml\">")
+    push(out, "  <link rel=\"stylesheet\" href=\"/style.css\">")
+    push(out, "</head>")
+    push(out, "<body>")
+    push(out, "  <header class=\"bar\">")
+    push(out, "    <a class=\"brand\" href=\"/\"><img src=\"/images/logo.svg\" alt=\"\" width=\"28\" height=\"28\"> Sayon packages</a>")
+    push(out, "    <form class=\"search\" action=\"/search\" role=\"search\">")
+    push(out, "      <input type=\"search\" name=\"q\" value=\"{html.escape(query)}\" placeholder=\"Search packages\" aria-label=\"Search packages\">")
+    push(out, "    </form>")
+    push(out, "    <nav aria-label=\"Sayon\">")
+    push(out, "      <a href=\"{GITHUB}/docs.sayon-lang.org\">Docs</a>")
+    push(out, "      <a href=\"{GITHUB}/packages.sayon-lang.org\">GitHub</a>")
+    push(out, "    </nav>")
+    push(out, "  </header>")
+    push(out, "  <main>")
+    for line in body
+        push(out, "    " + line)
+    push(out, "  </main>")
+    push(out, "  <footer>")
+    push(out, "    <p>Sayon's package registry, served by a Sayon program. Its index is <a href=\"{GITHUB}/packages.sayon-lang.org-index\">packages.sayon-lang.org-index</a>.</p>")
+    push(out, "  </footer>")
+    push(out, "</body>")
+    push(out, "</html>")
+    push(out, "")
+    return strings.join(out, "\n")
+
+private function listing(found: Array<registry.Summary>) -> Array<string>
+    out: Array<string> = ["<ul class=\"packages\">"]
+    for summary in found
+        push(out, "  <li><a href=\"/packages/{summary.name}\"><strong>{summary.name}</strong> <span class=\"version\">{html.text(summary.latest)}</span></a><p>{html.text(summary.description)}</p></li>")
+    push(out, "</ul>")
+    return out
+
+function home(state: registry.State) -> http.Response
+    all = registry.summaries(state)
+    body: Array<string> = []
+    push(body, "<section class=\"intro\">")
+    push(body, "  <h1>Sayon packages</h1>")
+    push(body, "  <p>Packages for <a href=\"{GITHUB}/sayon\">Sayon</a>: find one here, add it to <code>sayon.toml</code>, and <code>sayon install</code> fetches it. <code>sayon publish</code> adds yours.</p>")
+    push(body, "</section>")
+    if length(all) == 0
+        push(body, "<p class=\"empty\">No packages are published yet.</p>")
+    else
+        push(body, "<h2>All packages <span class=\"count\">{length(all)}</span></h2>")
+        for line in listing(all)
+            push(body, clone(line))
+    return http.text(200, "text/html; charset=utf-8", page("Sayon packages", "", body))
+
+function search(state: registry.State, query: string) -> http.Response
+    found = registry.search(state, query, 50)
+    body: Array<string> = []
+    push(body, "<h1>Search</h1>")
+    if length(found) == 0
+        push(body, "<p class=\"empty\">No packages match “{html.text(query)}”.</p>")
+    else
+        push(body, "<p class=\"count\">{length(found)} for “{html.text(query)}”</p>")
+        for line in listing(found)
+            push(body, clone(line))
+    return http.text(200, "text/html; charset=utf-8", page("{query} · Sayon packages", query, body))
+
+function package(state: registry.State, name: string) -> http.Response
+    versions = index.entries(state.index, name)
+    latest = index.latest(versions)
+    if not index.valid_name(name) or latest == nothing
+        return not_found()
+    collections.sort_by(versions, function(first: index.Entry, second: index.Entry) return semver.compare_text(first.version, second.version) > 0)
+    owners = accounts.owners(state.data)
+    owner = "nobody"
+    if haskey(owners, name)
+        owner = clone(owners[name])
+    body: Array<string> = []
+    push(body, "<article class=\"package\">")
+    push(body, "  <h1>{html.text(name)} <span class=\"version\">{html.text(latest.version)}</span></h1>")
+    if latest.description != ""
+        push(body, "  <p class=\"lead\">{html.text(latest.description)}</p>")
+    push(body, "  <h2>Use it</h2>")
+    push(body, "  <p>In <code>sayon.toml</code>, under <code>[dependencies]</code>:</p>")
+    push(body, "  <pre><code>{html.text(name)} = \"{html.text(latest.version)}\"</code></pre>")
+    push(body, "  <h2>Dependencies</h2>")
+    if length(latest.dependencies) == 0
+        push(body, "  <p>None.</p>")
+    else
+        push(body, "  <ul>")
+        for dependency in latest.dependencies
+            push(body, "    <li><a href=\"/packages/{dependency.package}\">{html.text(dependency.package)}</a> <code>{html.text(dependency.requirement)}</code></li>")
+        push(body, "  </ul>")
+    push(body, "  <h2>Versions</h2>")
+    push(body, "  <table>")
+    push(body, "    <thead><tr><th>Version</th><th>Published</th><th>Digest</th></tr></thead>")
+    push(body, "    <tbody>")
+    for entry in versions
+        day = strings.slice(entry.published, 0, 10)
+        push(body, "      <tr><td>{html.text(entry.version)}</td><td>{html.text(day)}</td><td><code>{html.text(strings.slice(entry.digest, 0, 19))}…</code></td></tr>")
+    push(body, "    </tbody>")
+    push(body, "  </table>")
+    push(body, "  <p class=\"owner\">Owned by <strong>{html.text(owner)}</strong>.</p>")
+    push(body, "</article>")
+    return http.text(200, "text/html; charset=utf-8", page("{name} · Sayon packages", "", body))
+
+function not_found() -> http.Response
+    body = ["<h1>Not found</h1>", "<p class=\"empty\">There is nothing at this address. <a href=\"/\">See every package.</a></p>"]
+    return http.text(404, "text/html; charset=utf-8", page("Not found · Sayon packages", "", body))

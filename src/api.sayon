@@ -1,0 +1,180 @@
+# The registry's API (PROTOCOL.md), under `/api/v1`, and its index, under
+# `/index`: what `sayon publish`, `login`, `search`, and `install` ask.
+
+crypto = import("standard/crypto.sayon")
+filesystem = import("standard/filesystem.sayon")
+io = import("standard/io.sayon")
+json = import("standard/json.sayon")
+strings = import("standard/strings.sayon")
+time = import("standard/time.sayon")
+accounts = import("src/accounts.sayon")
+archive = import("src/archive.sayon")
+http = import("src/http.sayon")
+index = import("src/index.sayon")
+manifest = import("src/manifest.sayon")
+registry = import("src/registry.sayon")
+semver = import("src/semver.sayon")
+
+constant PROTOCOL = 1
+
+type Protocol = [protocol: integer]
+type Me = [name: string]
+type NewAccount = [name: string, replace: boolean or nothing]
+type Made = [name: string, token: string]
+type Published = [name: string, version: string, digest: string]
+type Found = [packages: Array<registry.Summary>]
+
+# The index's `config.json`: where to publish, and where archives are.
+type Config = [protocol: integer, api: string, download: string]
+
+# The parts of a path between its `/`s.
+function parts(path: string) -> Array<string>
+    out: Array<string> = []
+    for part in strings.split(path, "/")
+        if part != ""
+            push(out, clone(part))
+    return out
+
+# The account a request's token belongs to, or the refusal.
+private function authenticate(request: http.Request, state: registry.State) -> string or http.Response
+    token = http.bearer(request)
+    if token == nothing
+        return http.refuse(401, "this needs an account's token: run `sayon login` first")
+    name = accounts.account_for(accounts.accounts(state.data), token)
+    if name == nothing
+        return http.refuse(401, "the token is not one this registry knows: run `sayon login` again")
+    return name
+
+# The operator makes an account, or gives one a new token.
+private function make_account(request: http.Request, state: registry.State) -> http.Response
+    token = http.bearer(request)
+    if token == nothing or not crypto.same(strings.bytes(token), strings.bytes(state.admin))
+        return http.refuse(403, "only the registry's operator makes accounts")
+    text = try strings.from_bytes(request.body)
+    if text is error
+        return http.refuse(400, "the request is not JSON")
+    asked = try json.decode<NewAccount>(text)
+    if asked is error
+        return http.refuse(400, "the request is not {{\"name\": ...}}")
+    if not index.valid_name(asked.name)
+        return http.refuse(400, "an account's name is lowercase letters, digits, and `_`, starting with a letter")
+    all = accounts.accounts(state.data)
+    replace = asked.replace == true
+    existed = haskey(all, asked.name)
+    made = accounts.make(all, asked.name, replace)
+    if made == nothing
+        return http.refuse(409, "the account `{asked.name}` already exists")
+    accounts.save_accounts(state.data, all)
+    status = 201
+    if existed
+        status = 200
+    return http.json_text(status, json.encode_value(Made(name = clone(asked.name), token = made)))
+
+# Publishes a version: the archive, checked, with its manifest naming the
+# package and the version, by the package's owner or, for a new package, by
+# whoever publishes it first. A version never changes.
+private function publish(request: http.Request, state: registry.State, name: string, version: string) -> http.Response
+    account = authenticate(request, state)
+    if typeof(account) != "string"
+        return account
+    if not index.valid_name(name)
+        return http.refuse(400, "`{name}` is not a package name")
+    if semver.parse(version) == nothing
+        return http.refuse(400, "`{version}` is not a version, such as 1.0.0")
+    if length(request.body) > archive.LARGEST
+        return http.refuse(413, "a package holds 10 MiB at most")
+    files = archive.files(request.body)
+    if typeof(files) == "string"
+        return http.refuse(400, files)
+    text = try archive.manifest_text(request.body, files)
+    if text is error
+        return http.refuse(400, text.message)
+    read = manifest.read(text)
+    if typeof(read) == "string"
+        return http.refuse(400, read)
+    if read.name != name or read.version != version
+        return http.refuse(400, "the archive's sayon.toml is {read.name} {read.version}, not {name} {version}")
+    owners = accounts.owners(state.data)
+    if haskey(owners, name) and owners[name] != account
+        return http.refuse(403, "`{name}` belongs to the account `{owners[name]}`")
+    for entry in index.entries(state.index, name)
+        if entry.version == version
+            return http.refuse(409, "{name} {version} is already published, and versions never change; publish a new version")
+    digest = "sha256:" + crypto.hex(crypto.sha256(request.body))
+    # The archive goes first, so that no version is ever listed without one.
+    target = registry.archive_path(state, name, version)
+    filesystem.create_directory(filesystem.parent(target))
+    io.write_file_bytes(target, request.body)
+    entry = index.Entry(name = clone(name), version = clone(version), digest = clone(digest), description = clone(read.description), dependencies = clone(read.dependencies), published = time.format(time.now()))
+    index.add(state.index, entry)
+    if not haskey(owners, name)
+        owners[clone(name)] = clone(account)
+        accounts.save_owners(state.data, owners)
+    return http.json_text(201, json.encode_value(Published(name = clone(name), version = clone(version), digest = digest)))
+
+private function archive_of(state: registry.State, name: string, version: string) -> http.Response
+    if index.valid_name(name)
+        for entry in index.entries(state.index, name)
+            if entry.version == version
+                file = registry.archive_path(state, name, version)
+                if filesystem.is_file(file)
+                    response = http.respond(200, "application/octet-stream", io.read_file_bytes(file))
+                    response.headers["X-Sayon-Digest"] = clone(entry.digest)
+                    return response
+    return http.refuse(404, "there is no version {version} of `{name}`")
+
+private function search(request: http.Request, state: registry.State) -> http.Response
+    query = ""
+    if haskey(request.query, "q")
+        query = clone(request.query["q"])
+    limit = 20
+    if haskey(request.query, "limit")
+        given = tonumber(request.query["limit"])
+        if typeof(given) == "integer" and given >= 1 and given <= 50
+            limit = given
+    return http.json_text(200, json.encode_value(Found(packages = registry.search(state, query, limit))))
+
+# The index's files, and its `config.json`, which names this registry.
+private function index_file(state: registry.State, rest: Array<string>) -> http.Response
+    if length(rest) == 1 and rest[0] == "config.json"
+        config = Config(protocol = PROTOCOL, api = clone(state.address), download = state.address + "/api/v1/packages/{{name}}/{{version}}/archive")
+        return http.json_text(200, json.encode_value(config))
+    if length(rest) == 0
+        return http.refuse(404, "there is nothing at this address")
+    name = clone(rest[length(rest) - 1])
+    if not index.valid_name(name) or strings.join(rest, "/") != index.path(name)
+        return http.refuse(404, "there is no package `{name}`")
+    file = filesystem.join(state.index, index.path(name))
+    if not filesystem.is_file(file)
+        return http.refuse(404, "there is no package `{name}`")
+    return http.text(200, "text/plain; charset=utf-8", io.read_file(file))
+
+# Answers a request to `/api/v1` or `/index`.
+function answer(request: http.Request, state: registry.State) -> http.Response
+    path = parts(request.path)
+    if length(path) >= 1 and path[0] == "index"
+        if request.method != "GET"
+            return http.refuse(405, "the index is read with GET")
+        rest: Array<string> = []
+        for position in range(1, length(path))
+            push(rest, clone(path[position]))
+        return index_file(state, rest)
+    if length(path) < 2 or path[0] != "api" or path[1] != "v1"
+        return http.refuse(404, "there is nothing at this address")
+    count = length(path)
+    if count == 2 and request.method == "GET"
+        return http.json_text(200, json.encode_value(Protocol(protocol = PROTOCOL)))
+    if count == 3 and path[2] == "me" and request.method == "GET"
+        account = authenticate(request, state)
+        if typeof(account) != "string"
+            return account
+        return http.json_text(200, json.encode_value(Me(name = account)))
+    if count == 3 and path[2] == "users" and request.method == "POST"
+        return make_account(request, state)
+    if count == 3 and path[2] == "search" and request.method == "GET"
+        return search(request, state)
+    if count == 5 and path[2] == "packages" and request.method == "PUT"
+        return publish(request, state, path[3], path[4])
+    if count == 6 and path[2] == "packages" and path[5] == "archive" and request.method == "GET"
+        return archive_of(state, path[3], path[4])
+    return http.refuse(404, "the registry does not answer this request")

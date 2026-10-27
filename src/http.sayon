@@ -1,0 +1,153 @@
+# HTTP/1.1 as the registry speaks it: a request read whole, with its
+# headers and body, and a response written whole, one of each for every
+# connection.
+
+json = import("standard/json.sayon")
+network = import("standard/network.sayon")
+strings = import("standard/strings.sayon")
+
+# The most a request's body may hold: an archive, and a little more.
+constant LARGEST = 10486784
+
+type Request = [method: string, path: string, query: Dict<string, string>, headers: Dict<string, string>, body: Array<byte>]
+
+type Response = [status: integer, kind: string, headers: Dict<string, string>, body: Array<byte>]
+
+# `{"error": ...}`, as the registry refuses a request.
+type Refusal = [error: string]
+
+function reason(status: integer) -> string
+    match status
+        case 200
+            return "OK"
+        case 201
+            return "Created"
+        case 400
+            return "Bad Request"
+        case 401
+            return "Unauthorized"
+        case 403
+            return "Forbidden"
+        case 404
+            return "Not Found"
+        case 405
+            return "Method Not Allowed"
+        case 409
+            return "Conflict"
+        case 413
+            return "Content Too Large"
+        case _
+            return "Internal Server Error"
+
+function respond(status: integer, kind: string, own body: Array<byte>) -> Response
+    return Response(status = status, kind = clone(kind), headers = [], body = body)
+
+function text(status: integer, kind: string, content: string) -> Response
+    return respond(status, kind, strings.bytes(content))
+
+function json_text(status: integer, content: string) -> Response
+    return text(status, "application/json", content)
+
+function refuse(status: integer, message: string) -> Response
+    return json_text(status, json.encode_value(Refusal(error = clone(message))))
+
+private function hex_value(digit: string) -> integer or nothing
+    found = strings.find("0123456789abcdef", strings.lower(digit))
+    if found == nothing or length(digit) != 1
+        return nothing
+    return found
+
+# A part of an address with `%XX` and `+` decoded.
+function decode(text: string) -> string
+    characters = strings.characters(strings.replace(text, "+", " "))
+    bytes: Array<byte> = []
+    index = 0
+    while index < length(characters)
+        if characters[index] == "%" and index + 2 < length(characters)
+            high = hex_value(characters[index + 1])
+            low = hex_value(characters[index + 2])
+            if high != nothing and low != nothing
+                push(bytes, byte(high * 16 + low))
+                index += 3
+                continue
+        for value in strings.bytes(characters[index])
+            push(bytes, value)
+        index += 1
+    return strings.from_bytes_lossy(bytes)
+
+function parse_query(text: string) -> Dict<string, string>
+    out: Dict<string, string> = []
+    for part in strings.split(text, "&")
+        if part == ""
+            continue
+        equals = strings.find(part, "=")
+        if equals == nothing
+            out[decode(part)] = ""
+        else
+            out[decode(strings.slice(part, 0, equals))] = decode(strings.slice(part, equals + 1, length(part)))
+    return out
+
+# The next request, a response refusing it, or nothing when the connection
+# ends first.
+function read(update connection: network.Connection) -> Request or Response or nothing
+    line = connection.read_line()
+    if line == nothing
+        return nothing
+    parts = strings.split(strings.trim(line), " ")
+    if length(parts) != 3
+        return refuse(400, "this is not an HTTP request")
+    headers: Dict<string, string> = []
+    while true
+        field = connection.read_line()
+        if field == nothing or strings.trim(field) == ""
+            break
+        colon = strings.find(field, ":")
+        if colon != nothing
+            headers[strings.lower(strings.trim(strings.slice(field, 0, colon)))] = strings.trim(strings.slice(field, colon + 1, length(field)))
+    size = 0
+    if haskey(headers, "content-length")
+        given = tonumber(headers["content-length"])
+        if typeof(given) != "integer" or given < 0
+            return refuse(400, "the request's length is not a number")
+        size = given
+    if size > LARGEST
+        return refuse(413, "a package holds 10 MiB at most")
+    body: Array<byte> = []
+    if size > 0
+        body = connection.read_bytes(size)
+        if length(body) != size
+            return refuse(400, "the request ended before its body did")
+    target = clone(parts[1])
+    path = clone(target)
+    query: Dict<string, string> = []
+    mark = strings.find(target, "?")
+    if mark != nothing
+        path = strings.slice(target, 0, mark)
+        query = parse_query(strings.slice(target, mark + 1, length(target)))
+    return Request(method = clone(parts[0]), path = path, query = query, headers = headers, body = body)
+
+# The token of `Authorization: Bearer <token>`.
+function bearer(request: Request) -> string or nothing
+    if not haskey(request.headers, "authorization")
+        return nothing
+    value = strings.trim(request.headers["authorization"])
+    if strings.starts_with(strings.lower(value), "bearer ")
+        token = strings.trim(strings.slice(value, 7, length(value)))
+        if token != "" and not strings.contains(token, " ")
+            return token
+    return nothing
+
+function write(update connection: network.Connection, response: Response)
+    connection.write("HTTP/1.1 {response.status} {reason(response.status)}\r\n")
+    connection.write("Content-Type: {response.kind}\r\n")
+    connection.write("Content-Length: {length(response.body)}\r\n")
+    for name, value in response.headers
+        connection.write("{name}: {value}\r\n")
+    connection.write("Connection: close\r\n\r\n")
+    connection.write_bytes(response.body)
+    connection.flush()
+
+test "addresses are decoded"
+    assert(decode("json+parser%2Fa%C3%A9") == "json parser/aé")
+    query = parse_query("q=text%20tools&limit=5&flag")
+    assert(query["q"] == "text tools" and query["limit"] == "5" and query["flag"] == "")

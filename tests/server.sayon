@@ -1,0 +1,63 @@
+filesystem = import("standard/filesystem.sayon")
+network = import("standard/network.sayon")
+strings = import("standard/strings.sayon")
+threads = import("standard/threads.sayon")
+accounts = import("src/accounts.sayon")
+archive = import("src/archive.sayon")
+index = import("src/index.sayon")
+registry = import("src/registry.sayon")
+server = import("src/server.sayon")
+
+constant DATA = "build/test-registry"
+
+function clear(folder: string)
+    if not filesystem.exists(folder)
+        return
+    entries = filesystem.walk(folder)
+    position = length(entries) - 1
+    while position >= 0
+        filesystem.remove(filesystem.join(folder, entries[position]))
+        position -= 1
+    filesystem.remove(folder)
+
+function package(version: string) -> Array<byte>
+    return archive.make([["sayon.toml", "[package]\nname = \"strings\"\nversion = \"{version}\"\ndescription = \"Helpers for text\"\n"], ["src/shout.sayon", "function shout(text: string) -> string\n    return text + \"!\"\n"]])
+
+test "publications reach the index, and the pages and archives show them"
+    clear(DATA)
+    filesystem.create_directory(filesystem.join(DATA, "index"))
+    all: Dict<string, accounts.Account> = []
+    made = accounts.make(all, "ada", false)
+    other = accounts.make(all, "bo", false)
+    accounts.save_accounts(DATA, all)
+    assert(made != nothing and other != nothing)
+    if made == nothing or other == nothing
+        return
+    listener = network.listen("127.0.0.1", 0)
+    address = "http://127.0.0.1:{listener.address().port}"
+    state = registry.State(data = clone(DATA), index = filesystem.join(DATA, "index"), address = clone(address), admin = "operator")
+    folder = clone(state.index)
+    running = threads.spawn(function()
+        server.serve(listener, state, 11)
+    )
+    ada: Dict<string, string> = ["Authorization" = "Bearer " + made]
+    bo: Dict<string, string> = ["Authorization" = "Bearer " + other]
+    published = network.request("PUT", address + "/api/v1/packages/strings/0.1.0", ada, package("0.1.0"))
+    assert(published.status == 201, published.text())
+    assert(network.request("PUT", address + "/api/v1/packages/strings/0.1.0", ada, package("0.1.0")).status == 409)
+    assert(network.request("PUT", address + "/api/v1/packages/strings/0.2.0", bo, package("0.2.0")).status == 403)
+    assert(network.request("PUT", address + "/api/v1/packages/strings/0.2.0", [], package("0.2.0")).status == 401)
+    assert(network.request("PUT", address + "/api/v1/packages/strings/0.2.0", ada, package("0.3.0")).status == 400)
+    line = network.get(address + "/index/" + index.path("strings"))
+    assert(line.status == 200 and strings.contains(line.text(), "\"version\":\"0.1.0\""))
+    config = network.get(address + "/index/config.json")
+    assert(strings.contains(config.text(), address + "/api/v1/packages/{{name}}/{{version}}/archive"))
+    fetched = network.get(address + "/api/v1/packages/strings/0.1.0/archive")
+    assert(fetched.status == 200 and fetched.body == package("0.1.0"))
+    assert(fetched.header("x-sayon-digest") == index.entries(folder, "strings")[0].digest)
+    page = network.get(address + "/packages/strings")
+    assert(page.status == 200 and strings.contains(page.text(), "strings = \"0.1.0\""))
+    found = network.get(address + "/search?q=text")
+    assert(strings.contains(found.text(), "/packages/strings"))
+    assert(network.get(address + "/packages/missing").status == 404)
+    threads.join(running)

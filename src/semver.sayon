@@ -1,0 +1,118 @@
+# Versions as semantic versioning writes them, `1.2.3` with an optional
+# pre-release such as `1.2.3-beta.1`, and their order.
+
+strings = import("standard/strings.sayon")
+
+type Version = [major: integer, minor: integer, patch: integer, pre: string]
+
+private function is_number(part: string) -> boolean
+    if part == "" or length(part) > 18
+        return false
+    for current in strings.characters(part)
+        if current < "0" or current > "9"
+            return false
+    return true
+
+private function is_identifier(part: string) -> boolean
+    if part == ""
+        return false
+    for current in strings.characters(part)
+        letter = current >= "a" and current <= "z" or current >= "A" and current <= "Z"
+        if not letter and not (current >= "0" and current <= "9") and current != "-"
+            return false
+    return true
+
+# A whole version, or nothing for text that is not one.
+function parse(text: string) -> Version or nothing
+    numbers_text = clone(text)
+    pre = ""
+    dash = strings.find(text, "-")
+    if dash != nothing
+        numbers_text = strings.slice(text, 0, dash)
+        pre = strings.slice(text, dash + 1, length(text))
+        if pre == ""
+            return nothing
+        for part in strings.split(pre, ".")
+            if not is_identifier(part)
+                return nothing
+    parts = strings.split(numbers_text, ".")
+    if length(parts) != 3
+        return nothing
+    numbers: Array<integer> = []
+    for part in parts
+        if not is_number(part) or length(part) > 1 and strings.starts_with(part, "0")
+            return nothing
+        value = tonumber(part)
+        if typeof(value) != "integer"
+            return nothing
+        push(numbers, value)
+    return Version(major = numbers[0], minor = numbers[1], patch = numbers[2], pre = pre)
+
+private function sign(difference: integer) -> integer
+    if difference < 0
+        return -1
+    if difference > 0
+        return 1
+    return 0
+
+# Semantic versioning's order: negative when `first` comes before `second`.
+# A pre-release comes before its release, and pre-releases compare
+# identifier by identifier, numbers as numbers and before words.
+function compare(first: Version, second: Version) -> integer
+    if first.major != second.major
+        return sign(first.major - second.major)
+    if first.minor != second.minor
+        return sign(first.minor - second.minor)
+    if first.patch != second.patch
+        return sign(first.patch - second.patch)
+    if first.pre == second.pre
+        return 0
+    if first.pre == ""
+        return 1
+    if second.pre == ""
+        return -1
+    left = strings.split(first.pre, ".")
+    right = strings.split(second.pre, ".")
+    index = 0
+    while index < length(left) and index < length(right)
+        a = clone(left[index])
+        b = clone(right[index])
+        if a != b
+            a_number = is_number(a)
+            b_number = is_number(b)
+            if a_number and b_number
+                x = tonumber(a)
+                y = tonumber(b)
+                if typeof(x) == "integer" and typeof(y) == "integer"
+                    return sign(x - y)
+            if a_number
+                return -1
+            if b_number
+                return 1
+            if a < b
+                return -1
+            return 1
+        index += 1
+    return sign(length(left) - length(right))
+
+# Text version of `compare`, for versions known to be valid.
+function compare_text(first: string, second: string) -> integer
+    a = parse(first)
+    b = parse(second)
+    if a == nothing or b == nothing
+        return 0
+    return compare(a, b)
+
+test "versions parse as semantic versioning writes them"
+    assert(parse("1.2.3") == Version(major = 1, minor = 2, patch = 3, pre = ""))
+    assert(parse("1.0.0-beta.1") == Version(major = 1, minor = 0, patch = 0, pre = "beta.1"))
+    for bad in ["1.2", "01.2.3", "1.2.3-", "1.2.3-be/ta", "a.b.c", ""]
+        assert(parse(bad) == nothing, bad)
+
+test "versions are ordered"
+    assert(compare_text("1.0.0-alpha", "1.0.0") < 0)
+    assert(compare_text("1.0.0-alpha.2", "1.0.0-alpha.10") < 0)
+    assert(compare_text("1.0.0-alpha", "1.0.0-alpha.1") < 0)
+    assert(compare_text("1.0.0-1", "1.0.0-alpha") < 0)
+    assert(compare_text("0.9.9", "0.10.0") < 0)
+    assert(compare_text("2.0.0", "2.0.0") == 0)

@@ -1,0 +1,73 @@
+# Runs the registry: its pages, its API, and its index, on this computer.
+#
+#     sayon run -- [--port 4100] [--data data] [--index <folder>] [--account <name>]...
+#
+# It serves at http://127.0.0.1:<port> (`--port 0` takes a free one), keeps
+# accounts, owners, and archives in `--data`, and the index in `--index`
+# (by default `index` inside the data folder; a clone of
+# packages.sayon-lang.org-index gets a commit for each publication). Once it
+# listens it prints one line of JSON: its address, its index's address, and
+# a token for each `--account`, made or given a new one. The operator's
+# token, for making accounts later, is SAYON_REGISTRY_ADMIN_TOKEN.
+
+filesystem = import("standard/filesystem.sayon")
+json = import("standard/json.sayon")
+network = import("standard/network.sayon")
+os = import("standard/os.sayon")
+accounts = import("src/accounts.sayon")
+registry = import("src/registry.sayon")
+server = import("src/server.sayon")
+
+type Options = [port: integer, data: string, index: string, accounts: Array<string>]
+
+type Started = [url: string, index: string, data: string, accounts: Dict<string, string>]
+
+function options(arguments: Array<string>) -> Options
+    port = 4100
+    data = "data"
+    index = ""
+    names: Array<string> = []
+    position = 0
+    while position < length(arguments)
+        option = clone(arguments[position])
+        if position + 1 >= length(arguments)
+            error("{option} needs a value")
+        value = clone(arguments[position + 1])
+        if option == "--port"
+            given = tonumber(value)
+            if typeof(given) != "integer" or given < 0 or given > 65535
+                error("the port is a number from 0 to 65535, not {value}")
+            port = given
+        elseif option == "--data"
+            data = value
+        elseif option == "--index"
+            index = value
+        elseif option == "--account"
+            push(names, value)
+        else
+            error("unknown option {option}; the options are --port, --data, --index, and --account")
+        position += 2
+    if index == ""
+        index = filesystem.join(data, "index")
+    return Options(port = port, data = data, index = index, accounts = names)
+
+function main()
+    chosen = options(os.arguments())
+    filesystem.create_directory(chosen.data)
+    filesystem.create_directory(chosen.index)
+    admin = accounts.new_token()
+    given = os.environment("SAYON_REGISTRY_ADMIN_TOKEN")
+    if given != nothing and given != ""
+        admin = given
+    all = accounts.accounts(chosen.data)
+    made: Dict<string, string> = []
+    for name in chosen.accounts
+        token = accounts.make(all, name, true)
+        if token != nothing
+            made[clone(name)] = token
+    accounts.save_accounts(chosen.data, all)
+    listener = network.listen("127.0.0.1", chosen.port)
+    address = "http://127.0.0.1:{listener.address().port}"
+    state = registry.State(data = clone(chosen.data), index = clone(chosen.index), address = clone(address), admin = admin)
+    print(json.encode_value(Started(url = clone(address), index = address + "/index", data = clone(chosen.data), accounts = made)))
+    server.serve(listener, state)

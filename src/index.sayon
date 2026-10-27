@@ -1,0 +1,113 @@
+# The index (PROTOCOL.md, "The index"): a folder, usually a clone of
+# packages.sayon-lang.org-index, with a file for each package, which holds
+# a line of JSON for each of its versions, oldest first. Lines are only
+# ever added.
+
+filesystem = import("standard/filesystem.sayon")
+io = import("standard/io.sayon")
+json = import("standard/json.sayon")
+os = import("standard/os.sayon")
+strings = import("standard/strings.sayon")
+manifest = import("src/manifest.sayon")
+semver = import("src/semver.sayon")
+
+# A version of a package, as its line in the index says.
+type Entry = [name: string, version: string, digest: string, description: string, dependencies: Array<manifest.Dependency>, published: string]
+
+# A package's file in the index, as crates.io-index places them: `1/a`,
+# `2/ab`, `3/a/abc`, and `ab/cd/abcdef` for longer names.
+function path(name: string) -> string
+    count = length(name)
+    if count == 1
+        return "1/" + name
+    if count == 2
+        return "2/" + name
+    if count == 3
+        return "3/" + strings.slice(name, 0, 1) + "/" + name
+    return strings.slice(name, 0, 2) + "/" + strings.slice(name, 2, 4) + "/" + name
+
+# Whether text is a package's name: lowercase letters, digits, and `_`,
+# starting with a letter, 64 characters at most.
+function valid_name(name: string) -> boolean
+    if name == "" or length(name) > 64
+        return false
+    first = true
+    for current in strings.characters(name)
+        letter = current >= "a" and current <= "z"
+        if first and not letter
+            return false
+        if not letter and not (current >= "0" and current <= "9") and current != "_"
+            return false
+        first = false
+    return true
+
+# The versions of a package, oldest first; none for a package not there.
+function entries(folder: string, name: string) -> Array<Entry>
+    file = filesystem.join(folder, path(name))
+    out: Array<Entry> = []
+    if not filesystem.is_file(file)
+        return out
+    for line in strings.lines(io.read_file(file))
+        if strings.trim(line) != ""
+            entry: Entry = json.decode(line)
+            push(out, entry)
+    return out
+
+# Adds a version's line to its package's file, and commits it when the
+# folder is a Git repository.
+function add(folder: string, entry: Entry)
+    relative = path(entry.name)
+    file = filesystem.join(folder, relative)
+    filesystem.create_directory(filesystem.parent(file))
+    io.append_file(file, json.encode_value(entry) + "\n")
+    if filesystem.exists(filesystem.join(folder, ".git"))
+        added = os.run("git", ["-C", clone(folder), "add", clone(relative)])
+        if added.status != 0
+            error("git could not add {relative}: {strings.trim(added.errors)}")
+        committed = os.run("git", ["-C", clone(folder), "commit", "--quiet", "-m", "Publish {entry.name} {entry.version}"])
+        if committed.status != 0
+            error("git could not commit {entry.name} {entry.version}: {strings.trim(committed.errors)}")
+
+# The names of every package in the index, in order.
+function names(folder: string) -> Array<string>
+    out: Array<string> = []
+    if not filesystem.is_directory(folder)
+        return out
+    for relative in filesystem.walk(folder)
+        name = filesystem.name(relative)
+        if valid_name(name) and relative == path(name) and filesystem.is_file(filesystem.join(folder, relative))
+            push(out, name)
+    return out
+
+# The latest version: the greatest release, or, before the first release,
+# the greatest pre-release.
+function latest(versions: Array<Entry>) -> Entry or nothing
+    best_release = -1
+    best_any = -1
+    for index in range(length(versions))
+        parsed = semver.parse(versions[index].version)
+        if parsed == nothing
+            continue
+        if best_any < 0 or semver.compare_text(versions[index].version, versions[best_any].version) > 0
+            best_any = index
+        if parsed.pre == "" and (best_release < 0 or semver.compare_text(versions[index].version, versions[best_release].version) > 0)
+            best_release = index
+    if best_release >= 0
+        return clone(versions[best_release])
+    if best_any >= 0
+        return clone(versions[best_any])
+    return nothing
+
+test "packages are placed as crates.io-index places them"
+    assert(path("a") == "1/a" and path("ab") == "2/ab" and path("abc") == "3/a/abc")
+    assert(path("strings") == "st/ri/strings")
+    assert(valid_name("web_http2") and not valid_name("Web") and not valid_name("2d") and not valid_name(""))
+
+test "the latest is the greatest release"
+    function entry(version: string) -> Entry
+        return Entry(name = "a", version = clone(version), digest = "", description = "", dependencies = [], published = "")
+    found = latest([entry("1.0.0-beta.1")])
+    assert(found != nothing and found.version == "1.0.0-beta.1")
+    found = latest([entry("0.9.0"), entry("1.0.0-beta.1"), entry("0.10.0")])
+    assert(found != nothing and found.version == "0.10.0")
+    assert(latest([]) == nothing)

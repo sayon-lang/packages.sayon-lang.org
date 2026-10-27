@@ -1,0 +1,82 @@
+# Answers each connection in turn: the API and the index (src/api.sayon),
+# the pages (src/site.sayon), and the files of `static`. One request at a
+# time, so that publications never interleave.
+
+filesystem = import("standard/filesystem.sayon")
+io = import("standard/io.sayon")
+network = import("standard/network.sayon")
+strings = import("standard/strings.sayon")
+api = import("src/api.sayon")
+http = import("src/http.sayon")
+registry = import("src/registry.sayon")
+site = import("src/site.sayon")
+
+constant STATIC = "static"
+
+private function kind_of(path: string) -> string
+    match filesystem.extension(path)
+        case "css"
+            return "text/css; charset=utf-8"
+        case "svg"
+            return "image/svg+xml"
+        case "png"
+            return "image/png"
+        case "ico"
+            return "image/x-icon"
+        case _
+            return "application/octet-stream"
+
+# A file of `static`, or nothing.
+private function static_file(path: string) -> http.Response or nothing
+    if strings.contains(path, "..") or strings.contains(path, "\\") or path == "/"
+        return nothing
+    file = STATIC + path
+    if not filesystem.is_file(file)
+        return nothing
+    return http.respond(200, kind_of(file), io.read_file_bytes(file))
+
+# The answer to a request.
+function route(request: http.Request, state: registry.State) -> http.Response
+    path = clone(request.path)
+    if strings.starts_with(path, "/api/") or path == "/api" or strings.starts_with(path, "/index/")
+        return api.answer(request, state)
+    if request.method != "GET"
+        return http.refuse(405, "pages are read with GET")
+    if path == "/"
+        return site.home(state)
+    if path == "/search"
+        query = ""
+        if haskey(request.query, "q")
+            query = clone(request.query["q"])
+        return site.search(state, query)
+    parts = api.parts(path)
+    if length(parts) == 2 and parts[0] == "packages"
+        return site.package(state, parts[1])
+    found = static_file(path)
+    if found != nothing
+        return found
+    return site.not_found()
+
+# Answers `count` connections, or without end.
+function serve(update listener: network.Listener, state: registry.State, count: integer or nothing = nothing)
+    served = 0
+    while count == nothing or served < count
+        connection = listener.accept()
+        served += 1
+        outcome = try answer(connection, state)
+        if outcome is error
+            print("a request failed:", outcome.message)
+
+private function answer(update connection: network.Connection, state: registry.State)
+    request = http.read(connection)
+    if request == nothing
+        return
+    if typeof(request) == "Response"
+        http.write(connection, request)
+        return
+    response = try route(request, state)
+    if response is error
+        print("a request failed:", response.message)
+        http.write(connection, http.refuse(500, "the registry failed to answer; try again later"))
+        return
+    http.write(connection, response)

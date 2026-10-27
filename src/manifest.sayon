@@ -1,0 +1,156 @@
+# The parts of a package's `sayon.toml` the registry reads: its name,
+# version, and description, and its dependencies, each of which must come
+# from a registry. Manifests are read as Sayon writes them: `[table]`
+# headers, and `key = value` lines of strings, arrays, and inline tables.
+
+strings = import("standard/strings.sayon")
+
+# A dependency, as the index records it; `registry` is nothing for the
+# registry the package comes from.
+type Dependency = [alias: string, package: string, requirement: string, registry: string or nothing]
+
+type Manifest = [name: string, version: string, description: string, dependencies: Array<Dependency>]
+
+# A line without its comment, outside strings.
+private function uncomment(line: string) -> string
+    characters = strings.characters(line)
+    quoted = false
+    index = 0
+    while index < length(characters)
+        if characters[index] == "\\" and quoted
+            index += 1
+        elseif characters[index] == "\""
+            quoted = not quoted
+        elseif characters[index] == "#" and not quoted
+            return strings.slice(line, 0, index)
+        index += 1
+    return clone(line)
+
+# Splits at the commas outside strings and brackets.
+private function split_top(text: string) -> Array<string>
+    characters = strings.characters(text)
+    out: Array<string> = []
+    depth = 0
+    quoted = false
+    start = 0
+    index = 0
+    while index < length(characters)
+        symbol = clone(characters[index])
+        if symbol == "\\" and quoted
+            index += 1
+        elseif symbol == "\""
+            quoted = not quoted
+        elseif not quoted and (symbol == "[" or symbol == "{{")
+            depth += 1
+        elseif not quoted and (symbol == "]" or symbol == "}}")
+            depth -= 1
+        elseif not quoted and depth == 0 and symbol == ","
+            push(out, strings.slice(text, start, index))
+            start = index + 1
+        index += 1
+    rest = strings.slice(text, start, length(text))
+    if strings.trim(rest) != ""
+        push(out, rest)
+    return out
+
+# A quoted string's text.
+private function unquote(raw: string) -> string or nothing
+    text = strings.trim(raw)
+    if length(text) < 2 or not strings.starts_with(text, "\"") or not strings.ends_with(text, "\"")
+        return nothing
+    inner = strings.slice(text, 1, length(text) - 1)
+    inner = strings.replace(inner, "\\\\", "\0")
+    inner = strings.replace(inner, "\\\"", "\"")
+    inner = strings.replace(inner, "\\n", "\n")
+    inner = strings.replace(inner, "\\t", "\t")
+    return strings.replace(inner, "\0", "\\")
+
+# The key and the value of `key = value`.
+private function pair(text: string) -> Array<string> or nothing
+    equals = strings.find(text, "=")
+    if equals == nothing
+        return nothing
+    key = strings.trim(strings.slice(text, 0, equals))
+    key = strings.replace(key, "\"", "")
+    return [key, strings.trim(strings.slice(text, equals + 1, length(text)))]
+
+# The fields of an inline table, `{ key = "value", ... }`.
+private function fields(raw: string) -> Dict<string, string> or nothing
+    text = strings.trim(raw)
+    if not strings.starts_with(text, "{{") or not strings.ends_with(text, "}}")
+        return nothing
+    out: Dict<string, string> = []
+    for part in split_top(strings.slice(text, 1, length(text) - 1))
+        found = pair(part)
+        if found == nothing
+            return nothing
+        value = unquote(found[1])
+        if value == nothing
+            return nothing
+        out[clone(found[0])] = value
+    return out
+
+private function dependency(alias: string, raw: string) -> Dependency or string
+    plain = unquote(raw)
+    if plain != nothing
+        return Dependency(alias = clone(alias), package = clone(alias), requirement = plain, registry = nothing)
+    table = fields(raw)
+    if table == nothing
+        return "the dependency `{alias}` is not written as Sayon reads it"
+    if not haskey(table, "version")
+        return "the dependency `{alias}` is not from a registry; a published package depends only on registry packages"
+    package = clone(alias)
+    if haskey(table, "package")
+        package = clone(table["package"])
+    registry: string or nothing = nothing
+    if haskey(table, "registry")
+        registry = clone(table["registry"])
+    return Dependency(alias = clone(alias), package = package, requirement = clone(table["version"]), registry = registry)
+
+# A manifest, or why it is refused.
+function read(text: string) -> Manifest or string
+    table = ""
+    name = ""
+    version = ""
+    description = ""
+    dependencies: Array<Dependency> = []
+    for raw in strings.lines(text)
+        line = strings.trim(uncomment(raw))
+        if line == ""
+            continue
+        if strings.starts_with(line, "[") and strings.ends_with(line, "]")
+            table = strings.trim(strings.slice(line, 1, length(line) - 1))
+            continue
+        found = pair(line)
+        if found == nothing
+            return "sayon.toml has a line Sayon does not read: {line}"
+        key = clone(found[0])
+        if table == "package"
+            value = unquote(found[1])
+            if key == "name" and value != nothing
+                name = value
+            elseif key == "version" and value != nothing
+                version = value
+            elseif key == "description" and value != nothing
+                description = value
+        elseif table == "dependencies"
+            read_dependency = dependency(key, found[1])
+            if typeof(read_dependency) == "string"
+                return read_dependency
+            push(dependencies, read_dependency)
+    if name == "" or version == ""
+        return "sayon.toml names no package and version"
+    return Manifest(name = name, version = version, description = description, dependencies = dependencies)
+
+test "a manifest's package and dependencies are read"
+    manifest = read("[package]\nname = \"words\"  # the name\nversion = \"1.0.0\"\ndescription = \"Words, \\\"louder\\\"\"\n\n[dependencies]\nstrings = \"0.2\"\nhttp = {{ version = \"1\", package = \"web_http\" }}\n\n[dev_dependencies]\nchecks = {{ path = \"../checks\" }}\n")
+    assert(typeof(manifest) != "string")
+    if typeof(manifest) != "string"
+        assert(manifest.name == "words" and manifest.version == "1.0.0")
+        assert(manifest.description == "Words, \"louder\"")
+        assert(length(manifest.dependencies) == 2)
+        assert(manifest.dependencies[1] == Dependency(alias = "http", package = "web_http", requirement = "1", registry = nothing))
+
+test "dependencies that are not from a registry are refused"
+    assert(typeof(read("[package]\nname = \"a\"\nversion = \"1.0.0\"\n[dependencies]\nb = {{ path = \"../b\" }}\n")) == "string")
+    assert(typeof(read("[package]\nname = \"a\"\n")) == "string")

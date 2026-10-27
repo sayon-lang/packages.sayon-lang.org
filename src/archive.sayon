@@ -1,0 +1,129 @@
+# Package archives (PROTOCOL.md, "Archives"): the domain
+# `sayon-package-digest-1` and a NUL byte, then each file in the order of
+# its path as its path's length, the path, its contents' length, and the
+# contents, each length 8 bytes, least significant first. They are checked
+# as `sayon` checks them.
+
+strings = import("standard/strings.sayon")
+
+constant DOMAIN = "sayon-package-digest-1\0"
+
+# The most an archive may hold.
+constant LARGEST = 10485760
+constant MOST_FILES = 10000
+
+# A file of an archive: its path, and where its contents are.
+type File = [path: string, start: integer, end: integer]
+
+# The length written at `at`, or nothing when it is cut short or longer
+# than any archive.
+private function length_at(archive: Array<byte>, at: integer) -> integer or nothing
+    if at + 8 > length(archive)
+        return nothing
+    for index in range(4, 8)
+        if archive[at + index] != 0
+            return nothing
+    value = 0
+    scale = 1
+    for index in range(4)
+        value += integer(archive[at + index]) * scale
+        scale *= 256
+    return value
+
+private function piece(archive: Array<byte>, start: integer, end: integer) -> Array<byte>
+    out: Array<byte> = []
+    for index in range(start, end)
+        push(out, archive[index])
+    return out
+
+# Whether a package can hold a file at `path`.
+function valid_path(path: string) -> boolean
+    if path == "" or strings.contains(path, "\\") or strings.contains(path, ":") or strings.contains(path, "\0")
+        return false
+    parts = strings.split(path, "/")
+    for part in parts
+        if part == "" or strings.starts_with(part, ".")
+            return false
+    top = clone(parts[0])
+    return top != "build" and top != "target" and top != "sayon.lock"
+
+# The files of an archive, or why it is refused: each path once, in order,
+# none differing from another only in case, and none leaving the package.
+function files(archive: Array<byte>) -> Array<File> or string
+    damaged = "the archive is damaged or not a Sayon package"
+    domain = strings.bytes(DOMAIN)
+    if length(archive) > LARGEST
+        return "a package holds 10 MiB at most"
+    if length(archive) < length(domain)
+        return damaged
+    for index in range(length(domain))
+        if archive[index] != domain[index]
+            return damaged
+    out: Array<File> = []
+    folded: Dict<string, boolean> = []
+    at = length(domain)
+    while at < length(archive)
+        if length(out) >= MOST_FILES
+            return "the archive holds more than {MOST_FILES} files"
+        path_length = length_at(archive, at)
+        if path_length == nothing or at + 8 + path_length > length(archive)
+            return damaged
+        name = try strings.from_bytes(piece(archive, at + 8, at + 8 + path_length))
+        if name is error
+            return damaged
+        at += 8 + path_length
+        content_length = length_at(archive, at)
+        if content_length == nothing or at + 8 + content_length > length(archive)
+            return damaged
+        start = at + 8
+        at = start + content_length
+        if not valid_path(name)
+            return "the archive holds `{name}`, which a package cannot"
+        if length(out) > 0 and out[length(out) - 1].path >= name
+            return "the archive holds `{name}` out of order or twice"
+        key = strings.lower(name)
+        if haskey(folded, key)
+            return "the archive holds `{name}` and another path that differs only in case"
+        folded[key] = true
+        push(out, File(path = clone(name), start = start, end = at))
+    return out
+
+# The text of the archive's `sayon.toml`, or why there is none.
+function manifest_text(archive: Array<byte>, entries: Array<File>) -> string
+    for file in entries
+        if file.path == "sayon.toml"
+            text = try strings.from_bytes(piece(archive, file.start, file.end))
+            if text is error
+                error("the archive's sayon.toml is not UTF-8")
+            return text
+    error("the archive has no sayon.toml")
+
+# An archive of files given as `[path, text]` pairs, in the order given.
+function make(contents: Array<Array<string>>) -> Array<byte>
+    out = strings.bytes(DOMAIN)
+    for pair in contents
+        for part in pair
+            bytes = strings.bytes(part)
+            size = length(bytes)
+            for _index in range(8)
+                push(out, byte(size % 256))
+                size = size / 256
+            for value in bytes
+                push(out, value)
+    return out
+
+test "an archive's files are read"
+    archive = make([["sayon.toml", "[package]\n"], ["src/main.sayon", "print(1)\n"]])
+    entries = files(archive)
+    assert(typeof(entries) != "string")
+    if typeof(entries) != "string"
+        assert(length(entries) == 2 and entries[1].path == "src/main.sayon")
+        assert(manifest_text(archive, entries) == "[package]\n")
+
+test "archives a package could not be are refused"
+    for bad in [[["../outside", "x"]], [[".hidden", "x"]], [["src/z", "x"], ["src/a", "y"]], [["Src/a", "x"], ["src/a", "y"]], [["C:/windows", "x"]], [["build/x", "y"]]]
+        assert(typeof(files(make(bad))) == "string")
+    assert(typeof(files(strings.bytes("not an archive"))) == "string")
+    cut = make([["sayon.toml", "[package]\n"]])
+    pop(cut)
+    assert(typeof(files(cut)) == "string")

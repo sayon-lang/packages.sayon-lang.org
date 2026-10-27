@@ -1,0 +1,43 @@
+# What the API and the pages share: where the registry keeps its data, and
+# the packages its index holds.
+
+filesystem = import("standard/filesystem.sayon")
+strings = import("standard/strings.sayon")
+index = import("src/index.sayon")
+
+# The registry: its data folder (accounts, owners, archives), its index
+# folder, the address it serves at, and the operator's token.
+type State = [data: string, index: string, address: string, admin: string]
+
+# A package as a list shows it.
+type Summary = [name: string, latest: string, description: string]
+
+# Where a version's archive is kept.
+function archive_path(state: State, name: string, version: string) -> string
+    return filesystem.join(filesystem.join(filesystem.join(state.data, "archives"), name), version + ".archive")
+
+# Every package, by name.
+function summaries(state: State) -> Array<Summary>
+    out: Array<Summary> = []
+    for name in index.names(state.index)
+        latest = index.latest(index.entries(state.index, name))
+        if latest != nothing
+            push(out, Summary(name = clone(name), latest = clone(latest.version), description = clone(latest.description)))
+    return out
+
+# The packages whose names or descriptions hold the words, an exact name
+# first, `limit` of them at most.
+function search(state: State, query: string, limit: integer) -> Array<Summary>
+    words = strings.lower(strings.trim(query))
+    exact: Array<Summary> = []
+    others: Array<Summary> = []
+    for summary in summaries(state)
+        if summary.name == words
+            push(exact, clone(summary))
+        elseif strings.contains(summary.name, words) or strings.contains(strings.lower(summary.description), words)
+            push(others, clone(summary))
+    for summary in others
+        push(exact, clone(summary))
+    while length(exact) > limit
+        pop(exact)
+    return exact

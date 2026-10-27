@@ -1,0 +1,32 @@
+# Writing HTML: text made safe to put in a page, and prose whose `code`
+# is marked as code.
+
+strings = import("standard/strings.sayon")
+
+# Text to put between tags: `&`, `<`, and `>` written as entities.
+function text(content: string) -> string
+    safe = strings.replace(content, "&", "&amp;")
+    safe = strings.replace(safe, "<", "&lt;")
+    return strings.replace(safe, ">", "&gt;")
+
+# Text to put in a quoted attribute too: `"` written as an entity as well.
+function escape(content: string) -> string
+    return strings.replace(text(content), "\"", "&quot;")
+
+# Prose between tags, with each part between backticks as `<code>`.
+function prose(content: string) -> string
+    parts = strings.split(content, "`")
+    out: Array<string> = []
+    for index in range(length(parts))
+        if index % 2 == 1
+            push(out, "<code>" + text(parts[index]) + "</code>")
+        else
+            push(out, text(parts[index]))
+    return strings.join(out, "")
+
+test "text is escaped"
+    assert(text("<a href=\"x\">&</a>") == "&lt;a href=\"x\"&gt;&amp;&lt;/a&gt;")
+    assert(escape("say \"hi\" & go") == "say &quot;hi&quot; &amp; go")
+
+test "prose marks code"
+    assert(prose("run `sayon explain` for <more>") == "run <code>sayon explain</code> for &lt;more&gt;")

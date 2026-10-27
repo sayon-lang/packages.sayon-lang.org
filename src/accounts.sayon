@@ -1,0 +1,75 @@
+# Accounts and who owns each package, kept in the registry's data folder
+# as JSON. A token is shown once, when it is made; the registry keeps only
+# its SHA-256.
+
+crypto = import("standard/crypto.sayon")
+filesystem = import("standard/filesystem.sayon")
+io = import("standard/io.sayon")
+json = import("standard/json.sayon")
+strings = import("standard/strings.sayon")
+time = import("standard/time.sayon")
+
+# An account: the SHA-256 of its token, in hexadecimal, and when it was made.
+type Account = [token: string, created: string]
+
+# Writes a file through a temporary one, so that it is never half written.
+function save(path: string, text: string)
+    temporary = path + ".tmp"
+    io.write_file(temporary, text)
+    filesystem.rename(temporary, path)
+
+function accounts(data: string) -> Dict<string, Account>
+    file = filesystem.join(data, "accounts.json")
+    if not filesystem.is_file(file)
+        return []
+    return json.decode(io.read_file(file))
+
+function save_accounts(data: string, all: Dict<string, Account>)
+    save(filesystem.join(data, "accounts.json"), json.encode_value(all))
+
+# Who owns each package: the account that published it first.
+function owners(data: string) -> Dict<string, string>
+    file = filesystem.join(data, "owners.json")
+    if not filesystem.is_file(file)
+        return []
+    return json.decode(io.read_file(file))
+
+function save_owners(data: string, all: Dict<string, string>)
+    save(filesystem.join(data, "owners.json"), json.encode_value(all))
+
+function hash(token: string) -> string
+    return crypto.hex(crypto.sha256(strings.bytes(token)))
+
+# A new token: 32 random bytes from the system's secure source.
+function new_token() -> string
+    return "sayon_" + crypto.hex(crypto.random_bytes(32))
+
+# The account a token belongs to.
+function account_for(all: Dict<string, Account>, token: string) -> string or nothing
+    wanted = strings.bytes(hash(token))
+    for name, account in all
+        if crypto.same(strings.bytes(account.token), wanted)
+            return clone(name)
+    return nothing
+
+# Makes an account, or with `replace` gives one a new token; the token, or
+# nothing when the account exists and is not to be replaced.
+function make(update all: Dict<string, Account>, name: string, replace: boolean) -> string or nothing
+    if haskey(all, name) and not replace
+        return nothing
+    token = new_token()
+    all[clone(name)] = Account(token = hash(token), created = time.format(time.now()))
+    return token
+
+test "a token is kept only as its hash, and finds its account"
+    all: Dict<string, Account> = []
+    token = make(all, "ada", false)
+    assert(token != nothing)
+    if token != nothing
+        assert(strings.starts_with(token, "sayon_") and length(token) == 70)
+        assert(all["ada"].token == hash(token) and all["ada"].token != token)
+        assert(account_for(all, token) == "ada")
+        assert(account_for(all, token + "x") == nothing)
+        assert(make(all, "ada", false) == nothing)
+        again = make(all, "ada", true)
+        assert(again != nothing and account_for(all, token) == nothing)
